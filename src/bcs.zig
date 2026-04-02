@@ -73,6 +73,7 @@ pub fn deserializePartial(comptime T: type, allocator: Allocator, bytes: []const
 
 /// Free all heap-allocated memory within a deserialized value.
 pub fn freeDeserialized(comptime T: type, allocator: Allocator, value: T) void {
+    @setEvalBranchQuota(10000);
     const info = @typeInfo(T);
     switch (info) {
         .pointer => |ptr_info| {
@@ -280,6 +281,7 @@ fn deserializeMap(comptime K: type, comptime V: type, allocator: Allocator, read
 // ── Serialize ──────────────────────────────────────────────────────────
 
 fn serializeValue(allocator: Allocator, list: *std.ArrayList(u8), value: anytype, depth: u32) Error!void {
+    @setEvalBranchQuota(10000);
     const T = @TypeOf(value);
     const info = @typeInfo(T);
 
@@ -378,6 +380,7 @@ fn serializeValue(allocator: Allocator, list: *std.ArrayList(u8), value: anytype
 // ── Deserialize ────────────────────────────────────────────────────────
 
 fn deserializeValue(comptime T: type, allocator: Allocator, reader: *Reader, depth: u32) Error!T {
+    @setEvalBranchQuota(10000);
     const info = @typeInfo(T);
 
     switch (info) {
