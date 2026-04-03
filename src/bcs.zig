@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const native_endian = builtin.cpu.arch.endian();
 
 // ── BCS Constants ──────────────────────────────────────────────────────
 
@@ -44,8 +46,105 @@ pub fn Map(comptime K: type, comptime V: type) type {
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+/// Exact serialized byte count for fixed-size types. Returns 0 for variable-length types.
+/// Only returns nonzero when the output size is fully determined at comptime.
+fn serializedSizeHint(comptime T: type) usize {
+    @setEvalBranchQuota(10000);
+    return switch (@typeInfo(T)) {
+        .bool => 1,
+        .int => |info| @divExact(info.bits, 8),
+        .array => |arr_info| blk: {
+            const child = serializedSizeHint(arr_info.child);
+            break :blk if (child > 0) arr_info.len * child else 0;
+        },
+        .@"struct" => |struct_info| blk: {
+            if (@hasDecl(T, "bcs_map") and T.bcs_map) break :blk 0;
+            if (struct_info.is_tuple) break :blk 0;
+            var total: usize = 0;
+            for (struct_info.fields) |field| {
+                const fh = serializedSizeHint(field.type);
+                if (fh == 0) break :blk 0;
+                total += fh;
+            }
+            break :blk total;
+        },
+        else => 0,
+    };
+}
+
+/// Fast-path serializer for fixed-size types. Writes directly to a pre-allocated buffer.
+fn serializeFixed(buf: []u8, pos: *usize, value: anytype, depth: u32) void {
+    @setEvalBranchQuota(10000);
+    const T = @TypeOf(value);
+    const info = @typeInfo(T);
+
+    switch (info) {
+        .bool => {
+            buf[pos.*] = if (value) 1 else 0;
+            pos.* += 1;
+        },
+        .int => {
+            const int_info = @typeInfo(T).int;
+            const byte_count = comptime @divExact(int_info.bits, 8);
+            if (comptime canBulkCopy(T)) {
+                @memcpy(buf[pos.*..][0..byte_count], std.mem.asBytes(&value));
+            } else {
+                const U = @Type(.{ .int = .{ .signedness = .unsigned, .bits = int_info.bits } });
+                const uvalue: U = @bitCast(value);
+                inline for (0..byte_count) |i| {
+                    buf[pos.* + i] = @truncate(uvalue >> @intCast(i * 8));
+                }
+            }
+            pos.* += byte_count;
+        },
+        .array => |arr_info| {
+            if (arr_info.child == u8) {
+                @memcpy(buf[pos.*..][0..arr_info.len], &value);
+                pos.* += arr_info.len;
+            } else if (comptime canBulkCopy(arr_info.child)) {
+                const bytes = std.mem.asBytes(&value);
+                @memcpy(buf[pos.*..][0..bytes.len], bytes);
+                pos.* += bytes.len;
+            } else {
+                for (value) |elem| {
+                    serializeFixed(buf, pos, elem, depth);
+                }
+            }
+        },
+        .@"struct" => |struct_info| {
+            const new_depth = depth + 1;
+            inline for (struct_info.fields) |field| {
+                serializeFixed(buf, pos, @field(value, field.name), new_depth);
+            }
+        },
+        else => unreachable,
+    }
+}
+
+/// Serialize a fixed-size value into a caller-provided buffer. Zero allocations.
+/// Returns the number of bytes written. Compile error for variable-length types.
+pub fn serializeInto(buf: []u8, value: anytype) Error!usize {
+    const size = comptime serializedSizeHint(@TypeOf(value));
+    if (size == 0) @compileError("serializeInto requires a fixed-size type; use serialize() for slices, optionals, maps, or unions");
+    if (buf.len < size) return Error.UnexpectedEndOfInput;
+    var pos: usize = 0;
+    serializeFixed(buf, &pos, value, 0);
+    return pos;
+}
+
 /// Serialize any BCS-compatible value to bytes.
 pub fn serialize(allocator: Allocator, value: anytype) Error![]u8 {
+    const hint = comptime serializedSizeHint(@TypeOf(value));
+
+    if (hint > 0) {
+        // Fixed-size fast path: single exact allocation, no ArrayList
+        const buf = allocator.alloc(u8, hint) catch return Error.OutOfMemory;
+        var pos: usize = 0;
+        serializeFixed(buf, &pos, value, 0);
+        return buf;
+    }
+
+    // Variable-size path: dynamic ArrayList
     var list: std.ArrayList(u8) = .{};
     errdefer list.deinit(allocator);
     try serializeValue(allocator, &list, value, 0);
@@ -119,16 +218,21 @@ pub fn freeDeserialized(comptime T: type, allocator: Allocator, value: T) void {
 // ── ULEB128 ────────────────────────────────────────────────────────────
 
 fn uleb128Append(allocator: Allocator, list: *std.ArrayList(u8), value: u32) Error!void {
+    var buf: [5]u8 = undefined;
+    var len: usize = 0;
     var v = value;
     while (true) {
         const byte: u8 = @truncate(v & 0x7f);
         v >>= 7;
         if (v == 0) {
-            list.append(allocator, byte) catch return Error.OutOfMemory;
-            return;
+            buf[len] = byte;
+            len += 1;
+            break;
         }
-        list.append(allocator, byte | 0x80) catch return Error.OutOfMemory;
+        buf[len] = byte | 0x80;
+        len += 1;
     }
+    list.appendSlice(allocator, buf[0..len]) catch return Error.OutOfMemory;
 }
 
 fn uleb128Read(reader: *Reader) Error!u32 {
@@ -198,6 +302,28 @@ fn readIntLittle(comptime T: type, reader: *Reader) Error!T {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/// Returns true if a slice/array of T can be bulk-copied as raw bytes.
+/// Only valid on little-endian platforms for integer types with byte-aligned widths.
+fn canBulkCopy(comptime T: type) bool {
+    if (native_endian != .little) return false;
+    return switch (@typeInfo(T)) {
+        .int => |info| info.bits % 8 == 0 and info.bits >= 8,
+        else => false,
+    };
+}
+
+// Compile-time proof: verify native memory layout matches BCS little-endian wire format.
+// If this fires, the platform claims LE but stores integers differently — canBulkCopy is unsafe.
+comptime {
+    if (native_endian == .little) {
+        const val: u32 = 0x04030201;
+        const bytes = std.mem.asBytes(&val);
+        if (bytes[0] != 0x01 or bytes[1] != 0x02 or bytes[2] != 0x03 or bytes[3] != 0x04)
+            @compileError("BCS bulk copy requires native little-endian integer layout — " ++
+                "platform reports LE but memory layout disagrees");
+    }
+}
 
 fn serializeToBytes(allocator: Allocator, value: anytype, depth: u32) Error![]u8 {
     var temp: std.ArrayList(u8) = .{};
@@ -306,6 +432,8 @@ fn serializeValue(allocator: Allocator, list: *std.ArrayList(u8), value: anytype
                     try uleb128Append(allocator, list, @intCast(value.len));
                     if (ptr_info.child == u8) {
                         list.appendSlice(allocator, value) catch return Error.OutOfMemory;
+                    } else if (comptime canBulkCopy(ptr_info.child)) {
+                        list.appendSlice(allocator, std.mem.sliceAsBytes(value)) catch return Error.OutOfMemory;
                     } else {
                         for (value) |elem| {
                             try serializeValue(allocator, list, elem, depth);
@@ -320,6 +448,8 @@ fn serializeValue(allocator: Allocator, list: *std.ArrayList(u8), value: anytype
         .array => |arr_info| {
             if (arr_info.child == u8) {
                 list.appendSlice(allocator, &value) catch return Error.OutOfMemory;
+            } else if (comptime canBulkCopy(arr_info.child)) {
+                list.appendSlice(allocator, std.mem.asBytes(&value)) catch return Error.OutOfMemory;
             } else {
                 for (value) |elem| {
                     try serializeValue(allocator, list, elem, depth);
@@ -412,6 +542,12 @@ fn deserializeValue(comptime T: type, allocator: Allocator, reader: *Reader, dep
                     if (ptr_info.child == u8) {
                         const bytes = try reader.readBytes(len);
                         return allocator.dupe(u8, bytes) catch Error.OutOfMemory;
+                    } else if (comptime canBulkCopy(ptr_info.child)) {
+                        const byte_count = @as(usize, len) * @sizeOf(ptr_info.child);
+                        const bytes = try reader.readBytes(byte_count);
+                        const slice = allocator.alloc(ptr_info.child, len) catch return Error.OutOfMemory;
+                        @memcpy(std.mem.sliceAsBytes(slice), bytes);
+                        return slice;
                     } else {
                         const slice = allocator.alloc(ptr_info.child, len) catch return Error.OutOfMemory;
                         for (slice) |*elem| {
@@ -428,6 +564,12 @@ fn deserializeValue(comptime T: type, allocator: Allocator, reader: *Reader, dep
             if (arr_info.child == u8) {
                 const bytes = try reader.readBytes(arr_info.len);
                 return bytes[0..arr_info.len].*;
+            } else if (comptime canBulkCopy(arr_info.child)) {
+                const byte_count = arr_info.len * @sizeOf(arr_info.child);
+                const bytes = try reader.readBytes(byte_count);
+                var result: T = undefined;
+                @memcpy(std.mem.asBytes(&result), bytes);
+                return result;
             } else {
                 var result: T = undefined;
                 for (&result) |*elem| {
@@ -1392,4 +1534,79 @@ test "rust parity: serde_known_vector (full Foo with BTreeMap)" {
     try testing.expectEqual(f.c.d, decoded.c.d);
     try testing.expectEqual(f.d, decoded.d);
     try testing.expectEqual(f.e.entries.len, decoded.e.entries.len);
+}
+
+// ── Bulk copy verification ────────────────────────────────────────────
+// Serialize via per-element path (forced) and compare against bulk path output.
+// Catches any divergence between canBulkCopy fast path and canonical encoding.
+
+fn serializePerElement(allocator: Allocator, comptime T: type, values: []const T) Error![]u8 {
+    var list: std.ArrayList(u8) = .{};
+    errdefer list.deinit(allocator);
+    try uleb128Append(allocator, &list, @intCast(values.len));
+    for (values) |v| try writeIntLittle(allocator, &list, T, v);
+    return list.toOwnedSlice(allocator) catch Error.OutOfMemory;
+}
+
+test "bulk copy produces identical bytes to per-element serialization" {
+
+    // u16
+    {
+        const data = [_]u16{ 0, 1, 0x0102, 0xFFFF, 0xABCD, 42 };
+        const bulk = try serialize(t_alloc, @as([]const u16, &data));
+        defer t_alloc.free(bulk);
+        const elem = try serializePerElement(t_alloc, u16, &data);
+        defer t_alloc.free(elem);
+        try testing.expectEqualSlices(u8, elem, bulk);
+    }
+
+    // u32
+    {
+        const data = [_]u32{ 0, 1, 0x12345678, 0xFFFFFFFF, 0xDEADBEEF };
+        const bulk = try serialize(t_alloc, @as([]const u32, &data));
+        defer t_alloc.free(bulk);
+        const elem = try serializePerElement(t_alloc, u32, &data);
+        defer t_alloc.free(elem);
+        try testing.expectEqualSlices(u8, elem, bulk);
+    }
+
+    // u64
+    {
+        const data = [_]u64{ 0, 1, 0xDEADBEEFCAFEBABE, std.math.maxInt(u64) };
+        const bulk = try serialize(t_alloc, @as([]const u64, &data));
+        defer t_alloc.free(bulk);
+        const elem = try serializePerElement(t_alloc, u64, &data);
+        defer t_alloc.free(elem);
+        try testing.expectEqualSlices(u8, elem, bulk);
+    }
+
+    // u128
+    {
+        const data = [_]u128{ 0, 1, std.math.maxInt(u128) };
+        const bulk = try serialize(t_alloc, @as([]const u128, &data));
+        defer t_alloc.free(bulk);
+        const elem = try serializePerElement(t_alloc, u128, &data);
+        defer t_alloc.free(elem);
+        try testing.expectEqualSlices(u8, elem, bulk);
+    }
+
+    // i32 (signed — two's complement LE)
+    {
+        const data = [_]i32{ 0, -1, 1, std.math.minInt(i32), std.math.maxInt(i32) };
+        const bulk = try serialize(t_alloc, @as([]const i32, &data));
+        defer t_alloc.free(bulk);
+        const elem = try serializePerElement(t_alloc, i32, &data);
+        defer t_alloc.free(elem);
+        try testing.expectEqualSlices(u8, elem, bulk);
+    }
+
+    // Roundtrip: serialize bulk, deserialize, compare values
+    {
+        const original = [_]u32{ 100, 200, 300, 400, 500 };
+        const bytes = try serialize(t_alloc, @as([]const u32, &original));
+        defer t_alloc.free(bytes);
+        const decoded = try deserialize([]const u32, t_alloc, bytes);
+        defer t_alloc.free(decoded);
+        try testing.expectEqualSlices(u32, &original, decoded);
+    }
 }

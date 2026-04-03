@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
+path = "lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -11,9 +12,16 @@ bcs = "=0.1.6"
 serde = { version = "=1.0.219", features = ["derive"] }
 thiserror = "=1.0.68"
 
+[[bin]]
+name = "throughput"
+path = "throughput.rs"
+
+[[bin]]
+name = "crossval"
+path = "crossval.rs"
+
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"

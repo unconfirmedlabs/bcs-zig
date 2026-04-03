@@ -62,6 +62,16 @@ const bytes = try bcs.serialize(allocator, map);
 
 Entries are automatically sorted by their BCS-encoded key bytes during serialization. Deserialization rejects out-of-order or duplicate keys.
 
+### Zero-allocation serialization
+
+For fixed-size types (no slices, optionals, maps, or unions), `serializeInto` writes directly to a caller-provided buffer with zero heap allocations:
+
+```zig
+var buf: [41]u8 = undefined;
+const n = try bcs.serializeInto(&buf, MyStruct{ .a = 42, .b = true, .c = address });
+// buf[0..n] contains the BCS bytes — no allocator needed
+```
+
 ### Partial deserialization
 
 ```zig
@@ -101,6 +111,59 @@ const bcs = b.dependency("bcs", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("bcs", bcs.module("bcs"));
 ```
 
+## Performance
+
+Benchmarked against Rust `bcs` v0.1.6 (serde-based). 1M iterations, Apple Silicon (aarch64), `c_allocator`.
+
+### Serialization
+
+| Type | Zig `serialize` | Zig `serializeInto` | Rust `to_bytes` | Zig vs Rust |
+|------|----------------|---------------------|-----------------|-------------|
+| u64 (8B) | 10.6 ns | **0.2 ns** | 11 ns | 1x / 55x |
+| SimpleStruct (41B) | 13 ns | **0.2 ns** | 75 ns | 5.8x / 375x |
+| [32]u8 address (32B) | 12 ns | **1.0 ns** | 51 ns | 4.1x / 51x |
+| NestedStruct (65B) | 26 ns | — | 88 ns | 3.4x |
+| MoveCall (176B) | 67 ns | — | 150 ns | 2.2x |
+| enum variant (33B) | 17 ns | — | 69 ns | 4.1x |
+| Vec\<u32\> ×1000 (4002B) | 80 ns | — | 537 ns | 6.7x |
+
+`serialize` returns an allocated `[]u8`. `serializeInto` writes to a caller-provided buffer with zero allocations (fixed-size types only).
+
+### Deserialization
+
+| Type | Zig | Rust | Zig vs Rust |
+|------|-----|------|-------------|
+| u64 (8B) | 0.2 ns | 0.2 ns | tie |
+| SimpleStruct (41B) | 0.2 ns | 52 ns | **260x** |
+| [32]u8 address (32B) | 0.2 ns | 52 ns | **260x** |
+| NestedStruct (65B) | 30 ns | 42 ns | 1.4x |
+| MoveCall (176B) | 120 ns | 273 ns | 2.3x |
+| enum variant (33B) | 4 ns | 51 ns | 12.8x |
+| Vec\<u32\> ×1000 (4002B) | 53 ns | 1997 ns | **37.7x** |
+
+### Why it's faster
+
+The speed comes from Zig's comptime, not from the Rust BCS code being slow. Rust `bcs` sits on serde's Serializer/Deserializer visitor pattern with runtime trait dispatch. Zig's `@typeInfo` resolves all type dispatch at compile time — for fixed-size types, the compiler unrolls serialization into direct memory operations (a few loads/stores). A hand-written Rust serializer without serde would be similarly fast.
+
+Additional optimizations:
+- **Bulk memcpy** for integer slices/arrays on little-endian platforms (verified correct at comptime)
+- **Exact pre-allocation** for fixed-size types via comptime size calculation
+- **Zero-allocation path** (`serializeInto`) bypasses the allocator entirely
+- **ULEB128 batch writes** into stack buffer instead of per-byte appends
+
+### Reproducing
+
+```bash
+# Build benchmarks
+cd bcs-zig
+zig build-exe -OReleaseFast --dep bcs -Mroot=bench/throughput.zig -Mbcs=src/bcs.zig --name throughput-zig -lc
+cd bench && cargo build --release --bin throughput && cd ..
+
+# Run
+./throughput-zig
+bench/target/release/throughput
+```
+
 ## Comparison with Rust reference (`diem/bcs`)
 
 ### Source complexity
@@ -110,7 +173,7 @@ exe.root_module.addImport("bcs", bcs.module("bcs"));
 | **Library code** | ~490 lines, 1 file | ~1,200 lines, 4 files (`lib.rs`, `ser.rs`, `de.rs`, `error.rs`) |
 | **Dependencies** | 0 (only `std`) | `serde` + `serde_derive` (proc macros, ~30k lines) |
 | **Derive mechanism** | `@typeInfo` comptime (built-in) | `#[derive(Serialize, Deserialize)]` proc macros |
-| **Test suite** | 68 tests (inline) | ~40 tests + proptest |
+| **Test suite** | 69 tests (inline) | ~40 tests + proptest |
 
 ### Binary size
 
@@ -215,7 +278,9 @@ ff ff ff ff ff ff ff ff 06 64 63 58 4d 42 37 64
 15 03 16 0a 05 04 14 15 59 69 03 c9 17 5a
 ```
 
-68 tests cover: all primitive types, strings, vectors, fixed arrays, optionals, structs, tagged unions, enums, tuples, sorted maps, ULEB128 edge cases, depth limits, error cases, and the full Rust `serde_known_vector` golden test.
+69 tests cover: all primitive types, strings, vectors, fixed arrays, optionals, structs, tagged unions, enums, tuples, sorted maps, ULEB128 edge cases, depth limits, error cases, bulk copy correctness verification, and the full Rust `serde_known_vector` golden test.
+
+Additionally, 70 cross-language test vectors (`bench/crossval.rs` and `bench/crossval.zig`) are verified byte-identical between Zig and Rust — covering signed/unsigned integers at boundary values, UTF-8 strings, nested types, all option states, maps with sorting, and Sui-specific address patterns.
 
 ## License
 
