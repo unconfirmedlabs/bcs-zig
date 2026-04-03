@@ -117,29 +117,28 @@ Benchmarked against Rust `bcs` v0.1.6 (serde-based). 1M iterations, Apple Silico
 
 ### Serialization
 
-| Type | Zig `serialize` | Zig `serializeInto` | Rust `to_bytes` | Zig vs Rust |
-|------|----------------|---------------------|-----------------|-------------|
-| u64 (8B) | 10.6 ns | **0.2 ns** | 11 ns | 1x / 55x |
-| SimpleStruct (41B) | 13 ns | **0.2 ns** | 75 ns | 5.8x / 375x |
-| [32]u8 address (32B) | 12 ns | **1.0 ns** | 51 ns | 4.1x / 51x |
-| NestedStruct (65B) | 26 ns | — | 88 ns | 3.4x |
-| MoveCall (176B) | 67 ns | — | 150 ns | 2.2x |
-| enum variant (33B) | 17 ns | — | 69 ns | 4.1x |
-| Vec\<u32\> ×1000 (4002B) | 80 ns | — | 537 ns | 6.7x |
+| Type | Zig | Rust | Zig vs Rust |
+|------|-----|------|-------------|
+| u64 (8B) | 10.8 ns | 12.5 ns | 1.2x |
+| SimpleStruct (41B) | 17.3 ns | 89.8 ns | **5.2x** |
+| Address [32]u8 (32B) | 12.3 ns | 51.2 ns | **4.2x** |
+| NestedStruct (65B) | 28.2 ns | 83.7 ns | **3.0x** |
+| MoveCall (176B) | 67.2 ns | 150.9 ns | **2.2x** |
+| Enum variant (33B) | 17.3 ns | 70.4 ns | **4.1x** |
+| Vec\<u32\> x1000 (4002B) | 79.7 ns | 536.1 ns | **6.7x** |
 
-`serialize` returns an allocated `[]u8`. `serializeInto` writes to a caller-provided buffer with zero allocations (fixed-size types only).
+Both `serialize` and `to_bytes` allocate and return owned output buffers.
 
 ### Deserialization
 
+Only types with real heap allocation are shown — fixed-size types like u64, SimpleStruct, and Address deserialize in <1 ns in both languages due to compiler optimizations, making comparison unreliable.
+
 | Type | Zig | Rust | Zig vs Rust |
 |------|-----|------|-------------|
-| u64 (8B) | 0.2 ns | 0.2 ns | tie |
-| SimpleStruct (41B) | 0.2 ns | 52 ns | **260x** |
-| [32]u8 address (32B) | 0.2 ns | 52 ns | **260x** |
-| NestedStruct (65B) | 30 ns | 42 ns | 1.4x |
-| MoveCall (176B) | 120 ns | 273 ns | 2.3x |
-| enum variant (33B) | 4 ns | 51 ns | 12.8x |
-| Vec\<u32\> ×1000 (4002B) | 53 ns | 1997 ns | **37.7x** |
+| NestedStruct (65B) | 30.8 ns | 41.1 ns | **1.3x** |
+| MoveCall (176B) | 121.2 ns | 286.9 ns | **2.4x** |
+| Enum variant (33B) | 3.8 ns | 51.1 ns | **13.4x** |
+| Vec\<u32\> x1000 (4002B) | 53.0 ns | 1,994 ns | **37.6x** |
 
 ### Why it's faster
 
