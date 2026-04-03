@@ -1,4 +1,4 @@
-import type { PayloadType, BenchmarkResult } from "./types";
+import type { BenchmarkResult } from "./types";
 import { ALL_PAYLOADS, PAYLOAD_SIZES } from "./types";
 import { getPayloadEntry } from "./payloads";
 

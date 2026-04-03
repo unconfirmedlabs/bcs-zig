@@ -39,7 +39,7 @@ self.onmessage = async (
   const { iterations } = e.data;
 
   // Load WASM inside the worker
-  const result = await WebAssembly.instantiateStreaming(fetch("/bench.wasm"));
+  const result = await WebAssembly.instantiateStreaming(fetch("/bcs.wasm"));
   const exports = result.instance.exports as unknown as WasmExports;
 
   for (const payload of ALL_PAYLOADS) {

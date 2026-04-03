@@ -7,6 +7,9 @@ type WasmExports = {
   roundtrip_move_call: () => bigint;
   roundtrip_enum: () => bigint;
   roundtrip_u64: () => bigint;
+  roundtrip_u128: () => bigint;
+  roundtrip_u256: () => bigint;
+  roundtrip_option_struct: () => bigint;
   roundtrip_vec_1000_u32: () => bigint;
   roundtrip_address_32b: () => bigint;
 };
@@ -17,6 +20,9 @@ const EXPORT_MAP: Record<PayloadType, keyof WasmExports> = {
   move_call: "roundtrip_move_call",
   enum_variant: "roundtrip_enum",
   u64: "roundtrip_u64",
+  u128: "roundtrip_u128",
+  u256: "roundtrip_u256",
+  option_struct: "roundtrip_option_struct",
   vec_1000_u32: "roundtrip_vec_1000_u32",
   address_32b: "roundtrip_address_32b",
 };
@@ -25,7 +31,7 @@ let wasmExports: WasmExports | null = null;
 
 export async function initWasm(): Promise<void> {
   if (wasmExports) return;
-  const result = await WebAssembly.instantiateStreaming(fetch("/bench.wasm"));
+  const result = await WebAssembly.instantiateStreaming(fetch("/bcs.wasm"));
   wasmExports = result.instance.exports as unknown as WasmExports;
 }
 

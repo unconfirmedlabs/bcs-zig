@@ -94,9 +94,10 @@ export function App() {
     };
 
     tsWorker.onmessage = (e: MessageEvent<WorkerMessage>) => {
-      if (e.data.type === "result") {
-        setTsResults((prev) => new Map(prev).set(e.data.result.payload, e.data.result));
-      } else if (e.data.type === "done") {
+      const msg = e.data;
+      if (msg.type === "result") {
+        setTsResults((prev) => new Map(prev).set(msg.result.payload, msg.result));
+      } else if (msg.type === "done") {
         tsFinished = true;
         setTsDone(true);
         tsWorker.terminate();
@@ -105,9 +106,10 @@ export function App() {
     };
 
     wasmWorker.onmessage = (e: MessageEvent<WorkerMessage>) => {
-      if (e.data.type === "result") {
-        setWasmResults((prev) => new Map(prev).set(e.data.result.payload, e.data.result));
-      } else if (e.data.type === "done") {
+      const msg = e.data;
+      if (msg.type === "result") {
+        setWasmResults((prev) => new Map(prev).set(msg.result.payload, msg.result));
+      } else if (msg.type === "done") {
         wasmFinished = true;
         setWasmDone(true);
         wasmWorker.terminate();
