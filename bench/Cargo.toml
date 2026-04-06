@@ -20,6 +20,42 @@ path = "throughput.rs"
 name = "crossval"
 path = "crossval.rs"
 
+[[bin]]
+name = "deser_crossval"
+path = "deser_crossval.rs"
+
+[[bin]]
+name = "sui_crossval"
+path = "sui_crossval.rs"
+
+[[bin]]
+name = "limit_crossval"
+path = "limit_crossval.rs"
+
+[[bin]]
+name = "random_crossval"
+path = "random_crossval.rs"
+
+[[bin]]
+name = "error_crossval"
+path = "error_crossval.rs"
+
+[[bin]]
+name = "mutation_crossval"
+path = "mutation_crossval.rs"
+
+[[bin]]
+name = "reader_crossval"
+path = "reader_crossval.rs"
+
+[[bin]]
+name = "seed_crossval"
+path = "seed_crossval.rs"
+
+[[bin]]
+name = "corpus_crossval"
+path = "corpus_crossval.rs"
+
 [profile.release]
 opt-level = 3
 lto = true

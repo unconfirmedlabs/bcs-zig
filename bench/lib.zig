@@ -9,6 +9,10 @@
 const bcs = @import("bcs");
 const std = @import("std");
 
+fn str(bytes: []const u8) bcs.String {
+    return bcs.String.init(bytes);
+}
+
 // ── Types (matching throughput.zig exactly) ──────────────────────────
 
 const SimpleStruct = struct {
@@ -25,7 +29,7 @@ const InnerMeta = struct {
 
 const NestedStruct = struct {
     id: u64,
-    name: []const u8,
+    name: bcs.String,
     scores: []const u32,
     active: bool,
     metadata: InnerMeta,
@@ -34,9 +38,9 @@ const NestedStruct = struct {
 const MoveCall = struct {
     sender: [32]u8,
     package: [32]u8,
-    module_name: []const u8,
-    function_name: []const u8,
-    type_args: []const []const u8,
+    module_name: bcs.String,
+    function_name: bcs.String,
+    type_args: []const bcs.String,
     args: []const []const u8,
     gas_budget: u64,
     gas_price: u64,
@@ -46,7 +50,7 @@ const Enum = union(enum) {
     unit,
     with_u64: u64,
     with_bytes: [32]u8,
-    with_string: []const u8,
+    with_string: bcs.String,
 };
 
 // ── Allocator (32KB fixed buffer, reset per call) ────────────────────
@@ -62,23 +66,23 @@ const nested_scores = [_]u32{ 100, 200, 300, 400, 500 };
 const nested_meta_tag: [8]u8 = "METATAG\x00".*;
 const nested_val = NestedStruct{
     .id = 999999,
-    .name = "hello_world_test",
+    .name = str("hello_world_test"),
     .scores = &nested_scores,
     .active = true,
     .metadata = .{ .version = 3, .flags = 0xDEADBEEF, .tag = nested_meta_tag },
 };
 
-const move_type_arg_0: []const u8 = "0x2::sui::SUI";
-const move_type_arg_1: []const u8 = "0x2::coin::Coin";
-const move_type_args: []const []const u8 = &.{ move_type_arg_0, move_type_arg_1 };
+const move_type_arg_0: bcs.String = str("0x2::sui::SUI");
+const move_type_arg_1: bcs.String = str("0x2::coin::Coin");
+const move_type_args: []const bcs.String = &.{ move_type_arg_0, move_type_arg_1 };
 const move_arg_0: []const u8 = &(.{0xaa} ** 32);
 const move_arg_1: []const u8 = &(.{0xbb} ** 16);
 const move_args: []const []const u8 = &.{ move_arg_0, move_arg_1 };
 const move_val = MoveCall{
     .sender = .{0x01} ** 32,
     .package = .{0x02} ** 32,
-    .module_name = "coin",
-    .function_name = "transfer",
+    .module_name = str("coin"),
+    .function_name = str("transfer"),
     .type_args = move_type_args,
     .args = move_args,
     .gas_budget = 50_000_000,

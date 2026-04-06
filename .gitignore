@@ -1,3 +1,8 @@
 .zig-cache/
+.zig-global-cache/
 zig-out/
 bench/target/
+throughput-baseline
+throughput-current
+throughput-head
+throughput-zig

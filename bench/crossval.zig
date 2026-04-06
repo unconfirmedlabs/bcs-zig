@@ -23,14 +23,14 @@ const TestEnum = union(enum) {
 
 const ComplexStruct = struct {
     id: u64,
-    name: []const u8,
+    name: bcs.String,
     scores: []const u32,
     active: bool,
     metadata: [8]u8,
 };
 
 const WithOption = struct { a: u32, b: ?u64, c: u8 };
-const TupleStruct = struct { i8, []const u8 };
+const TupleStruct = struct { i8, bcs.String };
 
 pub fn main() !void {
     const a = std.heap.c_allocator;
@@ -67,10 +67,10 @@ pub fn main() !void {
     emit(a, "i128_min", try bcs.serialize(a, @as(i128, @as(i128, -1) << 127)));
 
     // ── Strings ───────────────────────────────────────────────────
-    emit(a, "string_empty", try bcs.serialize(a, @as([]const u8, "")));
-    emit(a, "string_hello", try bcs.serialize(a, @as([]const u8, "hello")));
-    emit(a, "string_diem", try bcs.serialize(a, @as([]const u8, "diem")));
-    emit(a, "string_utf8", try bcs.serialize(a, @as([]const u8, "café")));
+    emit(a, "string_empty", try bcs.serialize(a, bcs.String.init("")));
+    emit(a, "string_hello", try bcs.serialize(a, bcs.String.init("hello")));
+    emit(a, "string_diem", try bcs.serialize(a, bcs.String.init("diem")));
+    emit(a, "string_utf8", try bcs.serialize(a, bcs.String.init("café")));
 
     // ── Vectors ───────────────────────────────────────────────────
     {
@@ -81,7 +81,7 @@ pub fn main() !void {
     emit(a, "vec_u16_2", try bcs.serialize(a, @as([]const u16, &.{ 1, 2 })));
     emit(a, "vec_u32_5", try bcs.serialize(a, @as([]const u32, &.{ 100, 200, 300, 400, 500 })));
     emit(a, "vec_u64_1", try bcs.serialize(a, @as([]const u64, &.{0xDEADBEEF})));
-    emit(a, "vec_string_2", try bcs.serialize(a, @as([]const []const u8, &.{ "abc", "def" })));
+    emit(a, "vec_string_2", try bcs.serialize(a, @as([]const bcs.String, &.{ bcs.String.init("abc"), bcs.String.init("def") })));
     emit(a, "vec_vec_u8", try bcs.serialize(a, @as([]const []const u8, &.{ &.{ 1, 2 }, &.{ 3, 4, 5 } })));
 
     // ── Fixed arrays ──────────────────────────────────────────────
@@ -95,15 +95,17 @@ pub fn main() !void {
     emit(a, "opt_none_u8", try bcs.serialize(a, @as(?u8, null)));
     emit(a, "opt_some_u64", try bcs.serialize(a, @as(?u64, 0xCAFEBABE)));
     emit(a, "opt_none_u64", try bcs.serialize(a, @as(?u64, null)));
-    emit(a, "opt_some_string", try bcs.serialize(a, @as(?[]const u8, "hi")));
-    emit(a, "opt_none_string", try bcs.serialize(a, @as(?[]const u8, null)));
+    emit(a, "opt_some_string", try bcs.serialize(a, @as(?bcs.String, bcs.String.init("hi"))));
+    emit(a, "opt_none_string", try bcs.serialize(a, @as(?bcs.String, null)));
     emit(a, "opt_opt_some", try bcs.serialize(a, @as(??u8, @as(?u8, 99))));
     emit(a, "opt_opt_none_inner", try bcs.serialize(a, @as(??u8, @as(?u8, null))));
     emit(a, "opt_opt_none_outer", try bcs.serialize(a, @as(??u8, null)));
 
     // ── Structs ───────────────────────────────────────────────────
     emit(a, "simple_struct", try bcs.serialize(a, SimpleStruct{
-        .a = 42, .b = true, .c = .{0xab} ** 32,
+        .a = 42,
+        .b = true,
+        .c = .{0xab} ** 32,
     }));
 
     emit(a, "nested_struct", try bcs.serialize(a, NestedStruct{
@@ -113,18 +115,22 @@ pub fn main() !void {
 
     emit(a, "complex_struct", try bcs.serialize(a, ComplexStruct{
         .id = 999999,
-        .name = "hello_world_test",
+        .name = bcs.String.init("hello_world_test"),
         .scores = &[_]u32{ 100, 200, 300, 400, 500 },
         .active = true,
         .metadata = "METATAG\x00".*,
     }));
 
     emit(a, "with_option_some", try bcs.serialize(a, WithOption{
-        .a = 10, .b = 20, .c = 30,
+        .a = 10,
+        .b = 20,
+        .c = 30,
     }));
 
     emit(a, "with_option_none", try bcs.serialize(a, WithOption{
-        .a = 10, .b = null, .c = 30,
+        .a = 10,
+        .b = null,
+        .c = 30,
     }));
 
     // ── Enums ─────────────────────────────────────────────────────
@@ -134,7 +140,7 @@ pub fn main() !void {
     emit(a, "enum_with_struct", try bcs.serialize(a, TestEnum{ .WithStruct = .{ .a = 1000, .b = 42 } }));
 
     // ── Tuples ────────────────────────────────────────────────────
-    emit(a, "tuple_i8_string", try bcs.serialize(a, TupleStruct{ @as(i8, -1), "diem" }));
+    emit(a, "tuple_i8_string", try bcs.serialize(a, TupleStruct{ @as(i8, -1), bcs.String.init("diem") }));
     emit(a, "tuple_pair", try bcs.serialize(a, .{ @as(u32, 42), true }));
 
     // ── Maps ──────────────────────────────────────────────────────
@@ -156,13 +162,33 @@ pub fn main() !void {
     }
 
     {
-        const MapStrU32 = bcs.Map([]const u8, u32);
+        const MapStrU32 = bcs.Map(bcs.String, u32);
         const entries = [_]MapStrU32.Entry{
-            .{ .key = "b", .value = 2 },
-            .{ .key = "a", .value = 1 },
-            .{ .key = "c", .value = 3 },
+            .{ .key = bcs.String.init("b"), .value = 2 },
+            .{ .key = bcs.String.init("a"), .value = 1 },
+            .{ .key = bcs.String.init("c"), .value = 3 },
         };
         emit(a, "map_string_u32", try bcs.serialize(a, MapStrU32.from(&entries)));
+    }
+
+    {
+        const MapU8U16 = bcs.Map(u8, u16);
+        const entries = [_]MapU8U16.Entry{
+            .{ .key = 2, .value = 200 },
+            .{ .key = 1, .value = 100 },
+            .{ .key = 1, .value = 999 },
+        };
+        emit(a, "map_u8_u16_dupe_keep_first", try bcs.serialize(a, MapU8U16.from(&entries)));
+    }
+
+    {
+        const MapStrU32 = bcs.Map(bcs.String, u32);
+        const entries = [_]MapStrU32.Entry{
+            .{ .key = bcs.String.init("b"), .value = 2 },
+            .{ .key = bcs.String.init("a"), .value = 1 },
+            .{ .key = bcs.String.init("a"), .value = 9 },
+        };
+        emit(a, "map_string_u32_dupe_keep_first", try bcs.serialize(a, MapStrU32.from(&entries)));
     }
 
     // ── Boundary values ───────────────────────────────────────────

@@ -4,28 +4,50 @@
 
 Single-file BCS (Binary Canonical Serialization) library for Zig 0.14+. Reference: Rust `bcs` crate v0.1.6 (diem/bcs). Zero dependencies beyond `std`.
 
-- **Source**: `src/bcs.zig` (1525 lines — ~550 impl + ~975 tests)
-- **Tests**: 68 unit tests, all passing
-- **Cross-validation**: 70 test vectors verified byte-identical against Rust `bcs::to_bytes` output
+- **Source**: `src/bcs.zig` (4611 lines)
+- **Tests**: 102 unit tests, all passing
+- **Compatibility suite**: 72 byte-identical serialization vectors plus deserialize/error, reader, seed, limit, randomized, mutation, corpus-based malformed-input, and Sui-shaped Rust/Zig cross-validation
+- **Design goal**: reference-level wire semantics with Zig-native API shape: comptime reflection, explicit wrapper types, direct reader/seed APIs, and allocator-explicit ownership
 
 ## Public API
 
 ```zig
 // Allocating serialization (any type)
 pub fn serialize(allocator: Allocator, value: anytype) Error![]u8
+pub fn serializeWithLimit(allocator: Allocator, value: anytype, limit: usize) Error![]u8
 
 // Zero-allocation serialization into caller buffer (fixed-size types only)
 pub fn serializeInto(buf: []u8, value: anytype) Error!usize
+pub fn serializeIntoWithLimit(buf: []u8, value: anytype, limit: usize) Error!usize
+
+// Exact size calculation
+pub fn serializedSize(value: anytype) Error!usize
+pub fn serializedSizeWithLimit(value: anytype, limit: usize) Error!usize
 
 // Deserialization
 pub fn deserialize(comptime T: type, allocator: Allocator, bytes: []const u8) Error!T
+pub fn deserializeWithLimit(comptime T: type, allocator: Allocator, bytes: []const u8, limit: usize) Error!T
 pub fn deserializePartial(comptime T: type, allocator: Allocator, bytes: []const u8) Error!struct { value: T, bytes_read: usize }
+pub fn deserializePartialWithLimit(comptime T: type, allocator: Allocator, bytes: []const u8, limit: usize) Error!struct { value: T, bytes_read: usize }
+pub fn deserializeReader(comptime T: type, allocator: Allocator, reader: anytype) !T
+pub fn deserializeReaderWithLimit(comptime T: type, allocator: Allocator, reader: anytype, limit: usize) !T
+pub fn deserializeSeed(seed: anytype, allocator: Allocator, bytes: []const u8) !SeedValue(@TypeOf(seed))
+pub fn deserializeSeedWithLimit(seed: anytype, allocator: Allocator, bytes: []const u8, limit: usize) !SeedValue(@TypeOf(seed))
+pub fn deserializeReaderSeed(seed: anytype, allocator: Allocator, reader: anytype) !SeedValue(@TypeOf(seed))
+pub fn deserializeReaderSeedWithLimit(seed: anytype, allocator: Allocator, reader: anytype, limit: usize) !SeedValue(@TypeOf(seed))
 
 // Memory cleanup for deserialized values containing heap allocations
 pub fn freeDeserialized(comptime T: type, allocator: Allocator, value: T) void
 
+// Rust-compatible UTF-8 string type
+pub const String = struct { bytes: []const u8, ... }
+
+// Zig-native equivalent of Rust DeserializeSeed stateful decoding
+pub const SeedDeserializer = struct { ... }
+
 // BCS-compatible sorted map type
 pub fn Map(comptime K: type, comptime V: type) type
+pub fn CanonicalMap(comptime K: type, comptime V: type) type
 ```
 
 ## Constants
@@ -44,7 +66,8 @@ Both match the Rust reference exactly.
 | `bool` | 1 byte: `0x00` or `0x01` | Invalid values rejected |
 | `u8`..`u256` | Fixed-size little-endian | Arbitrary-width ints (Rust only supports up to u128) |
 | `i8`..`i128` | Fixed-size little-endian two's complement | |
-| `[]const u8` | ULEB128 length + bytes | Strings / byte vectors |
+| `[]const u8` | ULEB128 length + bytes | Raw bytes (`Vec<u8>` / `&[u8]`) |
+| `bcs.String` | ULEB128 length + UTF-8 bytes | Rust `String` / `&str` semantics |
 | `[]const T` | ULEB128 length + elements | Variable-length sequences |
 | `[N]T` | N elements concatenated | No length prefix |
 | `?T` | `0x00` (null) or `0x01` + value | |
@@ -69,8 +92,10 @@ pub const Error = error{
     InvalidBool,         // bool byte not 0x00 or 0x01
     NonCanonicalUleb128, // ULEB128 has trailing zero continuation byte
     Uleb128Overflow,     // ULEB128 exceeds u32 range (>5 bytes)
+    Utf8,                // invalid UTF-8 for bcs.String
     SequenceTooLong,     // sequence length > max_sequence_length
     ContainerTooDeep,    // struct/union nesting > max_container_depth
+    NotSupported,        // requested API shape exceeds supported Rust-compatible limit behavior
     UnexpectedEndOfInput,// reader ran out of bytes
     TrailingBytes,       // extra bytes after deserializing (deserialize only, not deserializePartial)
     InvalidEnumTag,      // enum/union variant index out of range
@@ -116,7 +141,7 @@ pub const Error = error{
 
 ### Map Implementation
 
-- **Serialization** (line 325): Serializes each key to bytes, sorts by key bytes lexicographically, emits ULEB128 count + sorted key-value pairs. Allocates temporary `SortItem` array. Does NOT deduplicate (Rust BCS does).
+- **Serialization** (line 325): Serializes each key to bytes, sorts by key bytes lexicographically, deduplicates equal serialized keys with stable "keep first" semantics, then emits ULEB128 count + sorted key-value pairs. Allocates temporary `SortItem` array.
 - **Deserialization** (line 360): Validates keys are in strict ascending BCS byte order by comparing raw reader byte ranges. Rejects out-of-order or duplicate keys with `NonCanonicalMap`.
 
 ### Depth Tracking
@@ -128,7 +153,7 @@ pub const Error = error{
 
 ## Cross-Validation Results
 
-A cross-validation program (`bench/crossval.rs` and `bench/crossval.zig`) serializes 70 identical test vectors in both Rust and Zig and compares hex output. **All 70 vectors are byte-identical.** Coverage:
+A cross-validation program (`bench/crossval.rs` and `bench/crossval.zig`) serializes 72 identical test vectors in both Rust and Zig and compares hex output. **All 72 vectors are byte-identical.** Coverage:
 
 - 16 integer primitives (u8-u128, i8-i128 including MIN/MAX boundaries)
 - 4 string variants (empty, ASCII, ULEB128 prefix, UTF-8 multibyte)
@@ -138,20 +163,33 @@ A cross-validation program (`bench/crossval.rs` and `bench/crossval.zig`) serial
 - 5 struct configurations (simple, nested, complex with mixed types, with optional fields)
 - 4 enum variants (unit, u64, bytes, struct payload)
 - 2 tuple variants
-- 3 map variants (numeric keys, empty, string keys with sorting)
+- 5 map variants (numeric keys, empty, string keys with sorting, duplicate numeric keys, duplicate string keys)
 - 4 Sui-specific 32-byte addresses
 - 1 large vector (100 u32s)
 
-## Known Differences from Rust `bcs` v0.1.6
+Additional compatibility runners also pass:
+- `bench/deser_crossval.rs` / `bench/deser_crossval.zig`: deserialize/error parity, including invalid UTF-8 string rejection
+- `bench/error_crossval.rs` / `bench/error_crossval.zig`: exhaustive prefix truncation and malformed-input error-category parity
+- `bench/mutation_crossval.rs` / `bench/mutation_crossval.zig`: expanded deterministic mutations of valid payloads, covering near-valid decode/error parity for nested composite types
+- `bench/reader_crossval.rs` / `bench/reader_crossval.zig`: reader-based decode parity, including chunked input and `_with_limit`
+- `bench/seed_crossval.rs` / `bench/seed_crossval.zig`: seed-based decode parity, including reader seeds and `_with_limit`
+- `bench/corpus_crossval.rs` / `bench/corpus_crossval.zig`: embedded malformed-input corpus covering canonical sharp-edge cases
+- `bench/sui_crossval.rs` / `bench/sui_crossval.zig`: Sui-shaped fixtures with Rust `String` fields mapped to `bcs.String`
+- `bench/limit_crossval.rs` / `bench/limit_crossval.zig`: `_with_limit` parity
+- `bench/random_crossval.rs` / `bench/random_crossval.zig`: expanded deterministic randomized differential coverage over deeper composite shapes and additional map types
+
+## Intentional Non-Contract Differences from Rust `bcs` v0.1.6
+
+The remaining differences are about API shape and language model, not the BCS wire contract. The goal is to match Rust `bcs` semantics while staying idiomatic in Zig.
 
 | Feature | Rust | Zig | Impact |
 |---------|------|-----|--------|
-| Map dedup on serialize | Deduplicates keys (keeps first) | Does NOT dedup | Zig serializes all entries. Both reject non-canonical maps on deser. Callers should not pass duplicate keys. |
-| UTF-8 validation | Enforced (serde layer) | Not enforced (`[]const u8` = raw bytes) | BCS spec treats strings as byte sequences. UTF-8 is a serde concern. |
-| Custom depth limits | `_with_limit()` API variants | Fixed at 500 | Could be added as optional param if needed |
-| `serialized_size()` | Computes size without allocating | `serializedSizeHint` (private, fixed-size only) | Could be exposed publicly |
-| `from_reader` / `serialize_into` (Write trait) | Supports `impl Read` / `impl Write` | `serializeInto` for fixed types; deser always from `[]const u8` | Zig's `Reader` struct is slice-based |
-| u256+ support | Not supported (up to u128) | Native support for any bit width | Zig advantage |
+| Type discovery | `serde` derives / traits | `@typeInfo` comptime reflection | Same wire behavior without proc macros or trait-driven visitors. |
+| String vs bytes distinction | `String`/`&str` vs `Vec<u8>`/`&[u8]` | `bcs.String` vs `[]const u8` | Same wire semantics; Zig makes the distinction explicit with a wrapper type. |
+| Stateful decode surface | `DeserializeSeed` visitors | `SeedDeserializer` + seed objects | Same capability without reproducing serde's visitor abstraction. |
+| Reader surface | `from_reader` on `Read` | `deserializeReader` on any Zig reader exposing `readByte` | Same observable behavior on covered semantics, but with Zig's simpler reader model. |
+| Ownership / cleanup | Rust ownership + `Drop` | explicit allocator + `freeDeserialized` | Same decoded data, but lifetime management is explicit. |
+| Integer surface | Up to `u128` | Arbitrary-width integers supported by Zig | Strict superset of Rust's public type surface. |
 
 ## Benchmark Results (1M iterations, Apple Silicon, c_allocator)
 
@@ -206,32 +244,48 @@ Additional optimizations:
 
 ## Test Coverage Summary
 
-68 unit tests organized as:
+102 unit tests cover:
 
-- **Primitives** (12 tests): bool, u8-u256, i8-i128, round-trips
-- **Strings** (3 tests): serialization, empty, round-trip
-- **Vectors** (3 tests): typed vectors, empty, round-trip
-- **Fixed arrays** (3 tests): no length prefix, byte arrays, round-trip
-- **Optionals** (4 tests): some, none, round-trip, nested `??T`
-- **Structs** (4 tests): serialization, round-trip, nested, string fields
-- **Unions/Enums** (4 tests): tagged unions, unit enums, round-trips
-- **Tuples** (1 test): unnamed struct fields
-- **ULEB128** (3 tests): encoding, round-trip (0 to u32::MAX), non-canonical rejection
-- **Error cases** (6 tests): void, trailing bytes, unexpected EOF, invalid enum tag, Sui address, deserializePartial
-- **Complex types** (1 test): nested optionals + structs + arrays
-- **Rust parity** (18 tests): Ported from diem/bcs test suite — test_enum, serde_known_vector (Bar), uleb_encoding_and_variant, invalid_option, invalid_bool, variable_lengths, sequence_not_long_enough, leftover_bytes, zero_copy_parse, test_recursion_limit (linked list, enum), struct S round-trip (with/without option), Addr round-trip, Bar round-trip, map canonicality (2 tests), full Foo with BTreeMap
-- **Map tests** (6 tests): serialization with sorting, deserialization, non-canonical rejection, string keys, round-trip, empty
+- Primitive round-trips and endian checks across integer widths up to `u256`
+- Rust-compatible `bcs.String` UTF-8 validation, plus raw-byte slice behavior
+- Vectors, fixed arrays, optionals, tuples, structs, enums, and tagged unions
+- Serializer API parity for `serializeAppend`, `serializeWriter`, and `serializedSize`
+- Reader API parity for `deserializeReader`, reader limits, trailing bytes, and reader error propagation
+- Seed API parity for `deserializeSeed`, `deserializeReaderSeed`, custom free hooks, and limit enforcement
+- ULEB128 canonicality and overflow handling
+- Depth-limit semantics, trailing-byte detection, partial deserialize, and invalid-tag handling
+- Rust-ported parity cases including `serde_known_vector`, recursion-limit tests, and map canonicality
+- Map semantics across fixed keys, string keys, duplicate keys, canonical maps, and invalid UTF-8 string keys
 
 ## Files
 
 ```
-src/bcs.zig           — Library (single file, 1525 lines)
+src/bcs.zig           — Library (single file, 4611 lines)
 build.zig             — Build config
 build.zig.zon         — Package manifest (v0.1.0, min zig 0.14.0)
 bench/throughput.zig  — Zig throughput benchmark
 bench/throughput.rs   — Rust throughput benchmark
-bench/crossval.zig    — Zig cross-validation (70 test vectors)
-bench/crossval.rs     — Rust cross-validation (70 test vectors)
+bench/crossval.zig    — Zig serialization cross-validation (72 vectors)
+bench/crossval.rs     — Rust serialization cross-validation (72 vectors)
+bench/deser_crossval.zig  — Zig deserialize/error cross-validation
+bench/deser_crossval.rs   — Rust deserialize/error cross-validation
+bench/error_crossval.zig  — Zig malformed-input semantic cross-validation
+bench/error_crossval.rs   — Rust malformed-input semantic cross-validation
+bench/mutation_crossval.zig — Zig mutation-based malformed-input cross-validation
+bench/mutation_crossval.rs  — Rust mutation-based malformed-input cross-validation
+bench/reader_crossval.zig — Zig reader-based cross-validation
+bench/reader_crossval.rs  — Rust reader-based cross-validation
+bench/seed_crossval.zig   — Zig seed-based cross-validation
+bench/seed_crossval.rs    — Rust seed-based cross-validation
+bench/corpus_crossval.zig — Zig malformed-corpus cross-validation
+bench/corpus_crossval.rs  — Rust malformed-corpus cross-validation
+bench/malformed_corpus.txt — Shared malformed-input corpus fixture
+bench/limit_crossval.zig  — Zig limit-parity cross-validation
+bench/limit_crossval.rs   — Rust limit-parity cross-validation
+bench/random_crossval.zig — Zig randomized differential cross-validation
+bench/random_crossval.rs  — Rust randomized differential cross-validation
+bench/sui_crossval.zig    — Zig Sui-shaped cross-validation
+bench/sui_crossval.rs     — Rust Sui-shaped cross-validation
 bench/main.zig        — Binary size benchmark (Zig)
 bench/main.rs         — Binary size benchmark (Rust)
 bench/lib.zig         — WASM size benchmark (Zig)

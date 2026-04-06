@@ -14,4 +14,11 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run BCS tests");
     test_step.dependOn(&run_tests.step);
+
+    const compat = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "bench/verify_compat.sh",
+    });
+    const compat_step = b.step("compat", "Run Rust/Zig compatibility checks");
+    compat_step.dependOn(&compat.step);
 }
